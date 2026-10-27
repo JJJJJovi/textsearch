@@ -1,0 +1,47 @@
+# CI：MSYS2 UCRT64（MinGW-w64 GCC）+ CMake + CTest
+# 产物：textsearch.exe / textsearch-cli.exe / tests.exe（默认 TEXTSEARCH_STATIC=ON，
+# 零运行时 DLL 依赖，可直接作为 Release 附件）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-mingw:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-make
+
+      - name: Configure
+        run: cmake -G "MinGW Makefiles" -B build
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: textsearch-win64
+          path: |
+            build/textsearch.exe
+            build/textsearch-cli.exe
+          if-no-files-found: error
