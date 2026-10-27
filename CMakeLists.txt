@@ -63,17 +63,6 @@ target_link_libraries(textsearch PRIVATE
     dwmapi       # S5.1：DwmSetWindowAttribute 深色标题栏（此前仅手动命令行链接带了它）
 )
 
-# ---- 静态链接（默认开）----
-# 2026-10 起本机构建统一 -static：C:\Windows 下的 libstdc++-6 等运行时 DLL 是
-# 老版本残留，与 GCC 16.x 不兼容（动态链接启动即 0xC0000139），勿依赖动态。
-# 单文件分发（约 2MB）也用同一口径。确要动态链接（约 650KB）时配置
-# -DTEXTSEARCH_STATIC=OFF，并把工具链 bin 下配套的 3 个运行时 DLL 与 exe 同目录。
-option(TEXTSEARCH_STATIC "Static-link executables (zero runtime DLL deps)" ON)
-if(TEXTSEARCH_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    foreach(tgt textsearch textsearch-cli tests bench)
-        target_link_options(${tgt} PRIVATE -static -static-libgcc -static-libstdc++)
-    endforeach()
-endif()
 
 # ---- 测试 target: console ----
 add_executable(tests
@@ -123,6 +112,18 @@ endif()
 # ---- 测试注册 ----
 enable_testing()
 add_test(NAME textsearch_tests COMMAND tests)
+
+# ---- 静态链接（默认开；必须在所有 add_executable 之后）----
+# 2026-10 起本机构建统一 -static：C:\Windows 下的 libstdc++-6 等运行时 DLL 是
+# 老版本残留，与 GCC 16.x 不兼容（动态链接启动即 0xC0000139），勿依赖动态。
+# 单文件分发（约 2MB）也用同一口径。确要动态链接（约 650KB）时配置
+# -DTEXTSEARCH_STATIC=OFF，并把工具链 bin 下配套的 3 个运行时 DLL 与 exe 同目录。
+option(TEXTSEARCH_STATIC "Static-link executables (zero runtime DLL deps)" ON)
+if(TEXTSEARCH_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    foreach(tgt textsearch textsearch-cli tests bench)
+        target_link_options(${tgt} PRIVATE -static -static-libgcc -static-libstdc++)
+    endforeach()
+endif()
 
 # ---- UPX 压缩（可选，取消注释启用）----
 # find_program(UPX upx)
