@@ -6,6 +6,7 @@
 #include "core/encoding.h"
 #include "core/filesystem.h"
 #include "core/logger.h"
+#include "core/query_cache.h"
 #include "core/matcher.h"
 #include "core/text_detect.h"
 #include "core/threadpool.h"
@@ -1156,6 +1157,7 @@ bool Indexer::build(const std::filesystem::path& root,
     store_.close();
     reader_.reset();   // 释放 mmap 句柄，否则删除索引文件会失败（占用中）
     invalidate_cache(root);   // 重建后 mtime 变，cache 会自然 miss；显式作废更稳
+    global_query_cache().clear();   // A2 双保险：清查询缓存（键含 mtime/size 本可自然 miss）
     std::error_code ec;
     std::filesystem::remove_all(root / ".textsearch", ec);
     if (!store_.open(index_path_)) {
@@ -1476,6 +1478,31 @@ std::vector<MatchResult> Indexer::search(const std::wstring& pattern,
     std::vector<MatchResult> results;
     if (!available_ || pattern.empty()) return results;
 
+    // ---- A2：查询结果 LRU 缓存 ----
+    // 键在入口现取：索引文件 mtime+size 此刻必然反映「update_incremental 之后」
+    // 的状态（scanner 的索引路由先增量更新再 search；增量更新改写索引文件，
+    // mtime/size 变化 → 键必然 miss）。content_version 参与比较，索引内容
+    // 口径升级（kIndexContentVersion +1）后旧条目全部失效。
+    QueryCache::Key key;
+    key.pattern = pattern;
+    key.use_regex = opts.use_regex;
+    key.ignore_case = opts.ignore_case;
+    key.whole_word = opts.whole_word;
+    key.recursive = opts.recursive;
+    key.root = root_.wstring();
+    for (const auto& e : ext_set) key.ext_set_joined += (e + L'\x1F');
+    key.content_version = kIndexContentVersion;
+    {
+        std::error_code ec;
+        auto mt = std::filesystem::last_write_time(index_path_, ec);
+        key.index_mtime = ec ? 0 : file_mtime_unix(mt);
+        auto sz = std::filesystem::file_size(index_path_, ec);
+        key.index_size = ec ? -1 : static_cast<int64_t>(sz);
+    }
+    if (global_query_cache().get(key, results)) {
+        return results;   // 命中：直接返回上次同参查询结果的拷贝
+    }
+
     // 索引模式需手动应用用户当前勾选的扩展名集合（实时模式由 enumerate_files
     // 过滤文件列表，索引模式是全索引搜索，扩展名过滤必须在此补上，否则
     // 用户取消勾选的扩展名（如 .txt）仍会出现在结果中）。
@@ -1495,11 +1522,34 @@ std::vector<MatchResult> Indexer::search(const std::wstring& pattern,
         return out;
     };
 
-    if (opts.use_regex) {
-        return apply_ext_filter(search_regex(pattern, opts));
-    } else {
-        return apply_ext_filter(search_substring(pattern, opts));
+    std::vector<MatchResult> r = opts.use_regex
+        ? search_regex(pattern, opts)
+        : search_substring(pattern, opts);
+    r = apply_ext_filter(std::move(r));
+
+    // 写缓存守卫（TODO A2 的两项「不缓存」）：
+    // ① 达 max_results 上限 → 结果被截断，内容依赖遍历时序，不可复用；
+    // ② B3 告警路径 → 用户勾选了索引内不存在的扩展名，结果静默不完整
+    //    （判定口径与 scanner.cpp 的 warn_unindexed_extensions 一致：双方
+    //    小写后比对，任一集合为空视为无法判定）。该状态下不缓存；用户按
+    //    B3 提示重建索引后 mtime 变化，新键自然生效。
+    bool capped = r.size() >= opts.max_results;
+    bool b3_path = false;
+    if (!ext_set.empty()) {
+        std::set<std::wstring> built = indexed_ext_set();
+        if (!built.empty()) {
+            for (const auto& e : ext_set) {
+                if (built.count(to_lower_wstring(e)) == 0) {
+                    b3_path = true;
+                    break;
+                }
+            }
+        }
     }
+    if (!capped && !b3_path) {
+        global_query_cache().put(key, r);
+    }
+    return r;
 }
 
 // ---- 子串搜索（bi-gram + 邻接验证 F.2.2）----
@@ -2115,6 +2165,7 @@ bool Indexer::update_incremental(size_t* changed_count) {
     }
     // 索引文件已重写（mtime 变）→ 作废缓存实例，下次 open 重新映射
     invalidate_cache(root_);
+    global_query_cache().clear();   // A2 双保险：增量更新后查询缓存必须 miss
     logger::info(L"索引增量更新: 删除 " + std::to_wstring(deleted_files.size()) +
                  L" / 修改 " + std::to_wstring(changed_files.size()) +
                  L" / 新增 " + std::to_wstring(indexed_new) +

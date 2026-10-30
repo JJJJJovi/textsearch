@@ -50,6 +50,9 @@ public:
     bool commit();
 
     // 完整性校验（F.2.5：简单校验和）
+    // A3：不再重读文件——load() 已把 checksum 比对结果存入 checksum_ok_，
+    // 这里直接读成员。前提是调用方先 open()（index_exists /
+    // verify_and_recover 均满足）；未 load 过返回 false。
     bool verify() const;
 
     // 索引文件路径
@@ -61,6 +64,9 @@ private:
     std::unordered_map<std::string,
                        std::unordered_map<std::string, std::vector<uint8_t>>> dbs_;
     bool opened_ = false;
+    // A3：load() 时的 checksum 比对结果。load 是 verify 的唯一信息来源，
+    // verify() 据此免二次读文件（消 index_exists 的双倍全文件 I/O）。
+    bool checksum_ok_ = false;
 
     bool load();
     bool save() const;

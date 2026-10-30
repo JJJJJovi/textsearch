@@ -13,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <set>
 #include <string>
 #include <thread>
@@ -413,6 +414,63 @@ TEST_CASE(indexer_corruption_recovery) {
 
     // 损坏后 index_exists 也应返回 false
     REQUIRE(!Indexer::index_exists(tmp));
+
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
+}
+
+// ============================================================
+// 测试 7c：A3 — verify() 读 load() 存下的 checksum 成员，不再二次读文件
+// 证明方式（功能注入，等价于读次数计数）：open 成功后把磁盘上的索引文件
+// 删掉，verify() 仍返回 true —— 旧实现（tmp.load() 现场重读）此时必为 false。
+// ============================================================
+
+TEST_CASE(index_store_verify_no_second_read) {
+    auto tmp = make_test_dir(L"textsearch_idx_verify_once");
+    write_utf8_file(tmp / L"f.txt", L"verify single read content\n");
+
+    std::set<std::wstring> ext_set = {L".txt"};
+    Indexer idx;
+    REQUIRE(idx.build(tmp, ext_set));
+    auto idx_path = tmp / ".textsearch" / "index.lmdb";
+
+    {
+        // 唯一一次读：open 内的 load（解析 + checksum 比对一步完成）
+        IndexStore st;
+        REQUIRE(st.open(idx_path));
+
+        // 磁盘文件此时删除 —— verify 若还要读盘就该失败了
+        std::error_code ec;
+        REQUIRE(std::filesystem::remove(idx_path, ec));
+        REQUIRE(st.verify());   // A3：读成员 → true；旧实现（重读文件）→ false
+
+        // 对照：从未 load 过的 store（未 open）必须 false
+        IndexStore fresh;
+        REQUIRE(!fresh.verify());
+    }
+
+    // 语义保持：损坏文件（数据区字节翻转 → checksum 不符）open 即失败，
+    // verify() 亦 false（不会因为「存过成员」而误判有效）
+    {
+        REQUIRE(idx.build(tmp, ext_set));   // 重建，恢复索引文件
+        auto data = [&] {
+            std::ifstream ifs(idx_path, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(ifs)),
+                               std::istreambuf_iterator<char>());
+        }();
+        REQUIRE(data.size() > 64);
+        data[data.size() / 2] = static_cast<char>(data[data.size() / 2] ^ 0xFF);
+        auto corrupt_path = tmp / ".textsearch" / "index_corrupt.bin";
+        {
+            std::ofstream ofs(corrupt_path, std::ios::binary | std::ios::trunc);
+            ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
+        }
+        IndexStore bad;
+        REQUIRE(!bad.open(corrupt_path));   // checksum 比对失败 → open false
+        REQUIRE(!bad.verify());             // 成员结论为 false（非误判有效）
+        std::error_code ec;
+        std::filesystem::remove(corrupt_path, ec);
+    }
 
     std::error_code ec;
     std::filesystem::remove_all(tmp, ec);

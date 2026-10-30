@@ -163,6 +163,9 @@ bool IndexStore::save() const {
 
 // ---- 反序列化（读盘）----
 bool IndexStore::load() {
+    // A3：每次 load 重置校验结论（对象复用场景不得继承上一次的结论）
+    checksum_ok_ = false;
+
     std::ifstream ifs(path_, std::ios::binary);
     if (!ifs) return false;
 
@@ -222,9 +225,11 @@ bool IndexStore::load() {
         }
     }
 
-    // 校验 checksum（重新计算并比对）
+    // 校验 checksum（重新计算并比对）。比对结果存成员（A3）：
+    // verify() 读成员即可，无需再把整个文件重读一遍。
     uint32_t computed = compute_checksum();
-    if (computed != stored_checksum) {
+    checksum_ok_ = (computed == stored_checksum);
+    if (!checksum_ok_) {
         return false;
     }
 
@@ -239,8 +244,9 @@ bool IndexStore::open(const std::filesystem::path& path) {
     if (std::filesystem::exists(path)) {
         return load();
     }
-    // 新文件：dbs_ 为空
+    // 新文件：dbs_ 为空（也无 checksum 结论可用）
     dbs_.clear();
+    checksum_ok_ = false;
     return true;
 }
 
@@ -321,9 +327,12 @@ bool IndexStore::commit() {
 // ---- verify ----
 
 bool IndexStore::verify() const {
-    if (path_.empty() || !std::filesystem::exists(path_)) return false;
-    // 完整 load 到临时对象校验 magic + checksum
-    IndexStore tmp;
-    tmp.path_ = path_;
-    return tmp.load();
+    // A3（2026-10-31）：load() 已在解析完成时算好 checksum 并与文件头记录值
+    // 比对（checksum_ok_），这里直接读成员 —— 消除旧实现 tmp.load() 的
+    // 第二次全文件读取（index_exists 此前 open+verify 双倍 I/O）。
+    // 语义边界：verify() 校验的是「本次 load 进内存的数据」；open 之后文件
+    // 被外部改动/删除不再影响结论（单次读的目的正是如此）。未 load 过
+    //（新文件 / 头部非法 / 从未 open）→ false，与旧行为一致。
+    if (path_.empty()) return false;
+    return checksum_ok_;
 }
